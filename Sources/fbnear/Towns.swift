@@ -83,6 +83,77 @@ enum Towns {
         .sorted { $0.km < $1.km }
     }
 
+    // MARK: GraphQL typeahead (dashboard surface, works during search blocks)
+
+    /// Resolves a town code via the EventCometLocationTypeaheadDataSourceQuery
+    /// GraphQL call, issued from the events dashboard page. Candidates carry
+    /// full addresses so Jev can match the province.
+    static func resolveCodeGraphQL(driver: SafariDriver, name: String) throws -> (code: String, canonical: String)? {
+        let js = """
+        (function(){
+          window.__tq='pending';
+          var html=document.documentElement.innerHTML;
+          var dtsg=(html.match(/"DTSGInitialData",\\[\\],\\{"token":"([^"]+)"/)||[])[1];
+          var user=(html.match(/"USER_ID":"(\\d+)"/)||document.cookie.match(/c_user=(\\d+)/)||[])[1];
+          if(!dtsg||!user){window.__tq=encodeURIComponent(JSON.stringify({error:'no-auth'}));return 'x';}
+          var vars=JSON.stringify({params:{caller:"EVENTS_CREATION",include_null_state_results:true,integration_strategy:"STRING_MATCH",search_type:"CITY_TYPEAHEAD",viewer_coordinates:{},page_category:null,query:\(jsArg(name))},max_results:8,photo_width:50,photo_height:50});
+          var body='av='+user+'&__user='+user+'&__a=1&dpr=2&fb_dtsg='+encodeURIComponent(dtsg)+'&fb_api_caller_class=RelayModern&fb_api_req_friendly_name=EventCometLocationTypeaheadDataSourceQuery&variables='+encodeURIComponent(vars)+'&server_timestamps=true&doc_id=24347135491554631';
+          fetch('/api/graphql/',{method:'POST',credentials:'include',headers:{'content-type':'application/x-www-form-urlencoded'},body:body}).then(function(r){return r.json();}).then(function(j){
+            var edges=((j.data||{}).city_street_search||{}).street_results||{edges:[]};
+            var rows=(edges.edges||[]).map(function(e){
+              var n=e.node||{};
+              var p=n.page||{};
+              return {code:p.id, title:n.title, sub:n.subtitle, addr:(p.address||{}).full_address};
+            }).filter(function(r){return r.code;});
+            window.__tq=encodeURIComponent(JSON.stringify(rows));
+          }).catch(function(e){window.__tq=encodeURIComponent(JSON.stringify({error:e.message}));});
+          return 'fired';
+        })()
+        """
+        for _ in 0..<3 {
+            _ = try driver.eval(js)
+            Thread.sleep(forTimeInterval: 1.2)
+            if let raw = try? driver.eval("window.__tq||'pending'"), raw != "pending",
+               let dec = raw.removingPercentEncoding, dec != "pending",
+               let data = dec.data(using: .utf8), !data.isEmpty {
+                if dec.contains("no-auth") || dec.contains("error") { return nil }
+                if let rows = try? JSONDecoder().decode([GQLCity].self, from: data) {
+                    return try pickCity(name: name, rows: rows)
+                }
+            }
+            Thread.sleep(forTimeInterval: 1.0)
+        }
+        return nil
+    }
+
+    struct GQLCity: Codable {
+        var code: String
+        var title: String?
+        var sub: String?
+        var addr: String?
+    }
+
+    /// Jev picks the candidate that is the intended municipality.
+    static func pickCity(name: String, rows: [GQLCity]) throws -> (code: String, canonical: String)? {
+        guard !rows.isEmpty else { return nil }
+        var qs: [String: Jev.Question] = [:]
+        qs["pick"] = Jev.Question(
+            instructions: "Intended municipality: \(name), province of Verona, Veneto, Italy. Which candidate is this exact municipality? A same-name municipality in a different Italian province is NOT it (choose none).",
+            criteria: {
+                var c: [String: String] = ["none": "None of the candidates is the intended municipality"]
+                for (i, r) in rows.enumerated() {
+                    c["r\(i)"] = "Candidate: \(r.title ?? "?") (\(r.sub ?? "?")), address: \(r.addr ?? "?")"
+                }
+                return c
+            }())
+        guard let answers = try? Jev.choice(
+            state: "Facebook location typeahead matching for province of Verona, Italy",
+            questions: qs),
+            let pick = answers["pick"], pick != "none", let idx = Int(pick.dropFirst()),
+            idx < rows.count else { return nil }
+        return (rows[idx].code, rows[idx].title ?? name)
+    }
+
     // MARK: typeahead resolution
 
     /// Resolves one town name to a Facebook location code.

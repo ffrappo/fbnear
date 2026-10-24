@@ -143,6 +143,8 @@ func run() throws {
     let dashboard = hasFlag("--dashboard")
     let noFetch = hasFlag("--no-fetch")
     let publish = hasFlag("--publish")
+    let noSearch = hasFlag("--no-search")
+    let discover = hasFlag("--no-discover") ? false : true
     let categories = (argValue("--categories") ?? "").split(separator: ",").map(String.init).filter { !$0.isEmpty }
 
     let outDir = URL(fileURLWithPath: argValue("--out")
@@ -193,23 +195,16 @@ func run() throws {
     let skipped = gatedTowns.filter { $0.fbCode == nil && !missing.contains($0) }.count
     if skipped > 0 { print("[codes] skipping \(skipped) unresolved towns (7-day TTL)") }
     if !missing.isEmpty {
-        print("[codes] resolving \(missing.count) town codes via typeahead...")
-        do {
-            _ = try driver.go("https://www.facebook.com/events/search/?q=x", readyJS: FB.searchReady, timeout: 40)
-        } catch {
-            print("[codes] navigation failed (\(error)); recreating tab and retrying once")
-            driver.closeOurTab()
-            _ = try driver.go("https://www.facebook.com/events/search/?q=x", readyJS: FB.searchReady, timeout: 40)
-        }
+        print("[codes] resolving \(missing.count) town codes...")
+        _ = try? driver.go("https://www.facebook.com/events/", readyJS: FB.dashboardReady, timeout: 40)
         Thread.sleep(forTimeInterval: 1.5)
         var resolved = 0
         for var t in missing {
-            var result: (code: String, canonical: String)? = nil
-            for _ in 0..<2 {
+            var result: (code: String, canonical: String)? = try? Towns.resolveCodeGraphQL(driver: driver, name: t.name)
+            if result == nil && !noSearch {
+                _ = try? driver.go("https://www.facebook.com/events/search/?q=x", readyJS: FB.searchReady, timeout: 30)
                 result = try? Towns.resolveCode(driver: driver, name: t.name)
-                if result != nil { break }
-                _ = try? driver.go("https://www.facebook.com/events/search/?q=x", readyJS: FB.searchReady)
-                Thread.sleep(forTimeInterval: 1.5)
+                _ = try? driver.go("https://www.facebook.com/events/", readyJS: FB.dashboardReady, timeout: 40)
             }
             var townName = t.name
             if result == nil {
@@ -257,13 +252,21 @@ func run() throws {
     let eventsBox = LockedBox(events)
     var stageStart = Date()
     var loadedPages = 0
-    struct HarvestJob { let townIdx: Int; let code: String; let name: String; let km: Double; let query: String }
+    struct HarvestJob { let townIdx: Int; let code: String; let name: String; let km: Double; let query: String; let isDiscover: Bool; let tab: String }
     var jobsBuild: [HarvestJob] = []
-    for (i, town) in searchable.enumerated() {
-        let qs = town.km <= innerKm ? queriesInner : queriesOuter
-        for q in qs { jobsBuild.append(HarvestJob(townIdx: i, code: town.fbCode!, name: town.name, km: town.km, query: q)) }
+    if !noSearch {
+        for (i, town) in searchable.enumerated() {
+            let qs = town.km <= innerKm ? queriesInner : queriesOuter
+            for q in qs { jobsBuild.append(HarvestJob(townIdx: i, code: town.fbCode!, name: town.name, km: town.km, query: q, isDiscover: false, tab: "")) }
+        }
     }
-    if dashboard { jobsBuild.insert(HarvestJob(townIdx: -1, code: "", name: "Dashboard (nearby)", km: 0, query: ""), at: 0) }
+    if discover {
+        for (i, town) in searchable.enumerated() {
+            let tabs = town.km <= innerKm ? ["RECOMMENDED", "LOCAL"] : ["RECOMMENDED"]
+            for tb in tabs { jobsBuild.append(HarvestJob(townIdx: i, code: town.fbCode!, name: town.name + " [" + tb + "]", km: town.km, query: "", isDiscover: true, tab: tb)) }
+        }
+    }
+    if dashboard { jobsBuild.insert(HarvestJob(townIdx: -1, code: "", name: "Dashboard (nearby)", km: 0, query: "", isDiscover: false, tab: ""), at: 0) }
     let jobs = jobsBuild
 
     func storeCards(_ cards: [FB.Card], _ townName: String) -> Int {
@@ -303,27 +306,31 @@ func run() throws {
         let url: String
         if job.townIdx < 0 {
             url = "https://www.facebook.com/events/"
+        } else if job.isDiscover {
+            url = "https://www.facebook.com/events/?discover_tab=\(job.tab)&location_id=\(job.code)"
         } else {
             url = FB.searchURL(townCode: job.code, dateISO: fbDateFilter ? dateISO : nil, categoryCode: categories.first, query: job.query)
         }
-        // Fetch mode: no navigation, no render (dashboard job always navigates)
-        if !noFetch && job.townIdx >= 0 {
+        if job.isDiscover && blockedBox.with({ $0 }) { return }
+        _ = noFetch // discover always navigates: its SSR carries no links
+        // Fetch mode: no navigation, no render (dashboard/discover jobs always navigate)
+        if !noFetch && job.townIdx >= 0 && !job.isDiscover {
             if let fc = try? fetchCards(url, d) {
                 if fc.blocked == true {
                     print("  [harvest] BLOCKED by Facebook rate limit; stopping all workers")
                     blockedBox.with { $0 = true }
                     return
                 }
-                if let cards = fc.cards {
+                if let cards = fc.cards, !cards.isEmpty {
                     let fresh = storeCards(cards, job.name)
                     print("  [\(String(format: "%4.1f", job.km)) km] \(job.name.padding(toLength: 30, withPad: " ", startingAt: 0)) +\(fresh) (fetch)")
                     return
                 }
-                print("  [harvest] fetch unusable for \(job.name); falling back to navigation")
+                print("  [harvest] fetch empty for \(job.name); falling back to navigation")
             }
         }
         do {
-            let ready = job.townIdx < 0 ? FB.dashboardReady : FB.searchReady
+            let ready = (job.townIdx < 0 || job.isDiscover) ? FB.dashboardReady : FB.searchReady
             try d.go(url, readyJS: ready)
         } catch FbnearError.blocked {
             print("  [harvest] BLOCKED by Facebook rate limit; stopping all workers")
@@ -353,8 +360,8 @@ func run() throws {
                     return -1
                 }
                 if i < 0 { return }
-                if blockedBox.with({ $0 }) { return }
                 let job = jobs[i]
+                if blockedBox.with({ $0 }) && !job.isDiscover && job.townIdx >= 0 { continue }
                 harvestPage(job, drivers[w])
                 pagesBox.with { $0 += 1 }
                 Thread.sleep(forTimeInterval: 1.0 + Double.random(in: 0...1.5))
