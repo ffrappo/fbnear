@@ -117,7 +117,7 @@ func publishWeb(kept: [EventRecord], dateISO: String, towns: Int, maxDriveMin: I
 
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/bin/bash")
-    p.arguments = ["-c", "cd \(repoDir.path) && git add web/data.json PRODUCT.md && git commit -q -m 'data \(dateISO)' --allow-empty-message 2>/dev/null; git push -q origin main 2>&1 || true"]
+    p.arguments = ["-c", "cd \(repoDir.path) && git add web/data.json && git commit -q -m 'data \(dateISO)' && git push -q origin main && git subtree split --prefix=web -b gh-pages-tmp >/dev/null 2>&1 && git push -q origin gh-pages-tmp:gh-pages && git branch -q -D gh-pages-tmp"]
     p.standardOutput = FileHandle.nullDevice
     p.standardError = FileHandle.nullDevice
     try p.run()
@@ -636,9 +636,12 @@ func run() throws {
     print()
     print(Report.consoleSummary(records: kept))
 
-    if publish {
+    let harvestOK = loadedPages > 0 && !blockedBox.with({ $0 })
+    if publish && harvestOK {
         try publishWeb(kept: kept, dateISO: dateISO, towns: searchable.count,
                        maxDriveMin: maxDriveMin, generatedAt: timeDF.string(from: now))
+    } else if publish {
+        print("[publish] skipped: harvest did not complete (blocked or empty); keeping last good data")
     }
 }
 
