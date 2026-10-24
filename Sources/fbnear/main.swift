@@ -74,6 +74,7 @@ func run() throws {
     let keepTab = hasFlag("--keep-tab")
     let tabs = max(1, Int(argValue("--tabs") ?? "") ?? 2)
     let dashboard = hasFlag("--dashboard")
+    let noFetch = hasFlag("--no-fetch")
     let categories = (argValue("--categories") ?? "").split(separator: ",").map(String.init).filter { !$0.isEmpty }
 
     let outDir = URL(fileURLWithPath: argValue("--out")
@@ -196,12 +197,61 @@ func run() throws {
     if dashboard { jobsBuild.insert(HarvestJob(townIdx: -1, code: "", name: "Dashboard (nearby)", km: 0, query: ""), at: 0) }
     let jobs = jobsBuild
 
+    func storeCards(_ cards: [FB.Card], _ townName: String) -> Int {
+        var fresh = 0
+        eventsBox.with { ev in
+            for c in cards {
+                if ev[c.id] == nil {
+                    ev[c.id] = EventRecord(
+                        id: c.id, url: "https://www.facebook.com/events/\(c.id)/",
+                        title: c.text, start: nil, end: nil, endIsFallback: false,
+                        isPast: nil, address: nil, place: nil, lat: nil, lng: nil,
+                        driveSeconds: nil, driveMeters: nil,
+                        townsSeenIn: [townName], whenText: c.text, keep: false)
+                    fresh += 1
+                } else if !(ev[c.id]!.townsSeenIn.contains(townName)) {
+                    ev[c.id]!.townsSeenIn.append(townName)
+                }
+            }
+        }
+        return fresh
+    }
+
+    func fetchCards(_ url: String, _ d: SafariDriver) throws -> FB.FetchCards? {
+        _ = try d.eval(FB.fetchCardsJS(url))
+        let deadline = Date().addingTimeInterval(12)
+        while Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.4)
+            let raw = (try? d.eval("window.__fetchCards||'pending'")) ?? "pending"
+            if raw == "pending" { continue }
+            guard let data = raw.data(using: .utf8) else { return nil }
+            return try? JSONDecoder().decode(FB.FetchCards.self, from: data)
+        }
+        return nil
+    }
+
     func harvestPage(_ job: HarvestJob, _ d: SafariDriver) {
         let url: String
         if job.townIdx < 0 {
             url = "https://www.facebook.com/events/"
         } else {
             url = FB.searchURL(townCode: job.code, dateISO: fbDateFilter ? dateISO : nil, categoryCode: categories.first, query: job.query)
+        }
+        // Fetch mode: no navigation, no render (dashboard job always navigates)
+        if !noFetch && job.townIdx >= 0 {
+            if let fc = try? fetchCards(url, d) {
+                if fc.blocked == true {
+                    print("  [harvest] BLOCKED by Facebook rate limit; stopping all workers")
+                    blockedBox.with { $0 = true }
+                    return
+                }
+                if let cards = fc.cards {
+                    let fresh = storeCards(cards, job.name)
+                    print("  [\(String(format: "%4.1f", job.km)) km] \(job.name.padding(toLength: 30, withPad: " ", startingAt: 0)) +\(fresh) (fetch)")
+                    return
+                }
+                print("  [harvest] fetch unusable for \(job.name); falling back to navigation")
+            }
         }
         do {
             let ready = job.townIdx < 0 ? FB.dashboardReady : FB.searchReady
@@ -216,22 +266,7 @@ func run() throws {
         }
         if let data = try? d.evalJSON(FB.extractCards),
            let cards = try? JSONDecoder().decode([FB.Card].self, from: data) {
-            var fresh = 0
-            eventsBox.with { ev in
-                for c in cards {
-                    if ev[c.id] == nil {
-                        ev[c.id] = EventRecord(
-                            id: c.id, url: "https://www.facebook.com/events/\(c.id)/",
-                            title: c.text, start: nil, end: nil, endIsFallback: false,
-                            isPast: nil, address: nil, place: nil, lat: nil, lng: nil,
-                            driveSeconds: nil, driveMeters: nil,
-                            townsSeenIn: [job.name], whenText: c.text, keep: false)
-                        fresh += 1
-                    } else if !(ev[c.id]!.townsSeenIn.contains(job.name)) {
-                        ev[c.id]!.townsSeenIn.append(job.name)
-                    }
-                }
-            }
+            let fresh = storeCards(cards, job.name)
             print("  [\(String(format: "%4.1f", job.km)) km] \(job.name.padding(toLength: 30, withPad: " ", startingAt: 0)) +\(fresh)")
         }
     }
@@ -346,6 +381,38 @@ func run() throws {
                 if eventsBox.with({ ev in ev[id]?.start != nil }) { detailDone.with { $0 += 1 }; continue }
                 let url = "https://www.facebook.com/events/\(id)/"
                 if blockedBox.with({ $0 }) { return }
+                var fetched: FB.Detail? = nil
+                if !noFetch {
+                    _ = try? drivers[w].eval(FB.fetchDetailJS(url))
+                    let deadline = Date().addingTimeInterval(12)
+                    while Date() < deadline {
+                        Thread.sleep(forTimeInterval: 0.4)
+                        let raw = (try? drivers[w].eval("window.__fetchDetail||'pending'")) ?? "pending"
+                        if raw == "pending" { continue }
+                        if let data = raw.data(using: .utf8) {
+                            fetched = try? JSONDecoder().decode(FB.Detail.self, from: data)
+                        }
+                        break
+                    }
+                }
+                if let d = fetched, d.start != nil {
+                    eventsBox.with { ev in
+                        guard var r = ev[id] else { return }
+                        if let tt = d.title, tt.count > 3 { r.title = tt }
+                        r.start = d.start.map { Geo.localDate($0) }
+                        r.end = d.end.map { Geo.localDate($0) }
+                        r.isPast = d.isPast
+                        r.address = d.address
+                        r.place = d.place
+                        r.lat = d.lat
+                        r.lng = d.lng
+                        ev[id] = r
+                    }
+                    cacheBox.with { $0[id] = DetailCacheEntry(detail: d, fetchedAt: Date()) }
+                    detailDone.with { $0 += 1 }
+                    Thread.sleep(forTimeInterval: 0.6 + Double.random(in: 0...0.9))
+                    continue
+                }
                 do {
                     try drivers[w].go(url, readyJS: FB.eventReady)
                     if let data = try? drivers[w].evalJSON(FB.extractDetail),

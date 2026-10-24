@@ -81,6 +81,70 @@ enum FB {
         let text: String
     }
 
+    /// Fetch-mode: same-origin fetch of a search URL, parse SSR HTML with
+    /// DOMParser, reuse the card extraction logic offline. No navigation.
+    static func fetchCardsJS(_ url: String) -> String {
+        """
+        (function(){
+          window.__fetchCards='pending';
+          fetch('\(url)',{credentials:'include'}).then(function(r){return r.text();}).then(function(t){
+            if(t.indexOf('Temporarily Blocked')>=0){window.__fetchCards=encodeURIComponent(JSON.stringify({blocked:true}));return;}
+            var doc=new DOMParser().parseFromString(t,'text/html');
+            var seen={}, out=[];
+            doc.querySelectorAll('a[href*="/events/"]').forEach(function(a){
+              var m=(a.getAttribute('href')||'').match(/\\/events\\/(\\d{6,})/);
+              if(!m||seen[m[1]]) return;
+              seen[m[1]]=1;
+              var txt=(a.textContent||'').replace(/\\s+/g,' ').trim();
+              out.push({id:m[1], text:txt.slice(0,200)});
+            });
+            window.__fetchCards=encodeURIComponent(JSON.stringify({blocked:false, cards:out.slice(0,40)}));
+          }).catch(function(e){window.__fetchCards=encodeURIComponent(JSON.stringify({error:e.message}));});
+          return 'fired';
+        })()
+        """
+    }
+
+    /// Fetch-mode detail: fetch event page, regex preloads from SSR HTML.
+    static func fetchDetailJS(_ eventURL: String) -> String {
+        """
+        (function(){
+          window.__fetchDetail='pending';
+          fetch('\(eventURL)',{credentials:'include'}).then(function(r){return r.text();}).then(function(t){
+            var out={};
+            if(t.indexOf('Temporarily Blocked')>=0){out.blocked=true;window.__fetchDetail=encodeURIComponent(JSON.stringify(out));return;}
+            var tm=t.match(/<title[^>]*>([^<]*)<\\/title>/); if(tm){out.title=tm[1].replace(/ \\| Facebook$/,'');}
+            var re=/"event_place":\\{/g, mm;
+            while((mm=re.exec(t))!==null){
+              var seg=t.slice(mm.index,mm.index+900);
+              var la=seg.match(/"latitude":(-?\\d+\\.\\d+)/);
+              if(la){
+                out.lat=parseFloat(la[1]);
+                var lo=seg.match(/"longitude":(-?\\d+\\.\\d+)/); if(lo) out.lng=parseFloat(lo[1]);
+                var cn=seg.match(/"contextual_name":"((?:[^"\\\\]|\\\\.)*)"/);
+                if(cn){try{out.address=JSON.parse('"'+cn[1]+'"');}catch(e){}}
+                var pre=t.slice(Math.max(0,mm.index-4000),mm.index);
+                var st=[...pre.matchAll(/"start_timestamp":(\\d{9,})/g)];
+                if(st.length) out.start=parseInt(st[st.length-1][1]);
+                break;
+              }
+            }
+            if(!out.start){var s2=t.match(/"start_timestamp":(\\d{9,})/); if(s2) out.start=parseInt(s2[1]);}
+            var en=t.match(/"end_timestamp":(\\d{9,})/); if(en) out.end=parseInt(en[1]);
+            var ip=t.match(/"is_past":(true|false)/); if(ip) out.isPast=(ip[1]==='true');
+            window.__fetchDetail=encodeURIComponent(JSON.stringify(out));
+          }).catch(function(e){window.__fetchDetail=encodeURIComponent(JSON.stringify({error:e.message}));});
+          return 'fired';
+        })()
+        """
+    }
+
+    struct FetchCards: Codable {
+        var blocked: Bool?
+        var error: String?
+        var cards: [Card]?
+    }
+
     struct Row: Codable {
         let code: String
         let text: String
