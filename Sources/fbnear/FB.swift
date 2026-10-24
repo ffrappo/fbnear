@@ -3,16 +3,16 @@ import Foundation
 /// Facebook events URL grammar, card harvesting and event detail extraction.
 enum FB {
     static func searchURL(townCode: String, dateISO: String?, categoryCode: String?, query: String) -> String {
-        var filters: [String: String] = [:]
-        filters["rp_events_location:0"] = "{\"name\":\"filter_events_location\",\"args\":\"\(townCode)\"}"
+        // Captured grammar: {"rp_events:0":{"name":"filter_events_location","args":"CODE"}}
+        var parts: [String] = []
+        parts.append("\"rp_events:0\":{\"name\":\"filter_events_location\",\"args\":\"\(townCode)\"}")
         if let d = dateISO {
-            filters["filter_events_date_range:0"] = "{\"name\":\"filter_events_date\",\"args\":\"\(d)\"}"
+            parts.append("\"filter_events_date_range:0\":{\"name\":\"filter_events_date\",\"args\":\"\(d)\"}")
         }
         if let c = categoryCode {
-            filters["filter_events_category:0"] = "{\"name\":\"filter_events_category\",\"args\":\"\(c)\"}"
+            parts.append("\"filter_events_category:0\":{\"name\":\"filter_events_category\",\"args\":\"\(c)\"}")
         }
-        let json = String(data: try! JSONSerialization.data(withJSONObject: filters), encoding: .utf8)!
-        let compact = compactJSON(json)
+        let compact = "{" + parts.joined(separator: ",") + "}"
         let b64 = Data(compact.utf8).base64EncodedString()
         return "https://www.facebook.com/events/search/?q=\(query)&filters=\(b64)"
     }

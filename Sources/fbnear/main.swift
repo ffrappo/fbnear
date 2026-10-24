@@ -144,6 +144,7 @@ func run() throws {
     let noFetch = hasFlag("--no-fetch")
     let publish = hasFlag("--publish")
     let noSearch = hasFlag("--no-search")
+    let tunnel = (argValue("--engine") ?? "safari") == "tunnel"
     let discover = hasFlag("--no-discover") ? false : true
     let categories = (argValue("--categories") ?? "").split(separator: ",").map(String.init).filter { !$0.isEmpty }
 
@@ -249,6 +250,7 @@ func run() throws {
     // MARK: Stage 3: harvest cards per town (parallel worker tabs)
 
     var events: [String: EventRecord] = [:]
+
     let eventsBox = LockedBox(events)
     var stageStart = Date()
     var loadedPages = 0
@@ -268,6 +270,73 @@ func run() throws {
     }
     if dashboard { jobsBuild.insert(HarvestJob(townIdx: -1, code: "", name: "Dashboard (nearby)", km: 0, query: "", isDiscover: false, tab: ""), at: 0) }
     let jobs = jobsBuild
+
+    // Tunnel engine: enumeration via local stealth fetcher through an SSH SOCKS
+    // tunnel to maestro-hetzner; logged-out, no Safari, no account.
+    func scraplingFetch(_ url: String, outFile: String) -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/Users/ffrappo/.local/bin/scrapling")
+        p.arguments = ["extract", "fetch", url, outFile, "--proxy", "socks5://127.0.0.1:11080", "--headless", "--wait", "4000"]
+        let errPath = "/tmp/fbnear-scrapling.err"
+        fm.createFile(atPath: errPath, contents: nil)
+        p.standardOutput = FileHandle(forWritingAtPath: errPath)
+        p.standardError = FileHandle(forWritingAtPath: errPath)
+        try? p.run()
+        let deadline = Date().addingTimeInterval(120)
+        while p.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.3) }
+        if p.isRunning { p.terminate(); return nil }
+        guard fm.fileExists(atPath: outFile) else { return nil }
+        return try? String(contentsOfFile: outFile, encoding: .utf8)
+    }
+    func ensureTunnel() -> Bool {
+        let probe = Process()
+        probe.executableURL = URL(fileURLWithPath: "/usr/bin/nc")
+        probe.arguments = ["-z", "127.0.0.1", "11080"]
+        probe.standardOutput = FileHandle.nullDevice; probe.standardError = FileHandle.nullDevice
+        try? probe.run(); probe.waitUntilExit()
+        if probe.terminationStatus == 0 { return true }
+        let ssh = Process()
+        ssh.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        ssh.arguments = ["-D", "127.0.0.1:11080", "-fN", "-o", "ExitOnForwardFailure=yes", "maestro-hetzner"]
+        try? ssh.run(); ssh.waitUntilExit()
+        Thread.sleep(forTimeInterval: 2.0)
+        let probe2 = Process()
+        probe2.executableURL = URL(fileURLWithPath: "/usr/bin/nc")
+        probe2.arguments = ["-z", "127.0.0.1", "11080"]
+        probe2.standardOutput = FileHandle.nullDevice; probe2.standardError = FileHandle.nullDevice
+        try? probe2.run(); probe2.waitUntilExit()
+        return probe2.terminationStatus == 0
+    }
+    if tunnel {
+        guard ensureTunnel() else { print("[tunnel] cannot establish SOCKS tunnel on 127.0.0.1:11080"); exit(1) }
+        print("[tunnel] SOCKS egress via maestro-hetzner up")
+        let tmpFile = NSTemporaryDirectory() + "fbnear-tunnel-page.html"
+        var tunnelPages = 0
+        for town in searchable {
+            let qs = town.km <= innerKm ? queriesInner : queriesOuter
+            for q in qs {
+                let url = FB.searchURL(townCode: town.fbCode!, dateISO: nil, categoryCode: nil, query: q)
+                guard let html = scraplingFetch(url, outFile: tmpFile) else {
+                    print("  [tunnel] fetch failed: \(town.name) q=\(q)"); continue
+                }
+                tunnelPages += 1
+                let ids = Set(html.split(separator: "\"").flatMap { line -> String? in
+                    guard let r = line.range(of: #"/events/(\d{10,})"#, options: .regularExpression) else { return nil }
+                    return String(line[r]).replacingOccurrences(of: "/events/", with: "").replacingOccurrences(of: "/", with: "")
+                })
+                var cards: [FB.Card] = []
+                for id in ids where id.count >= 10 { cards.append(FB.Card(id: String(id), text: "")) }
+                let fresh = storeCards(cards, town.name)
+                print("  [\(String(format: "%4.1f", town.km)) km] \(town.name.padding(toLength: 30, withPad: " ", startingAt: 0)) q=\(q) +\(fresh)")
+                try? fm.removeItem(atPath: tmpFile)
+                print("  [tunnel] ids in page: \(ids.count) | bytes \(html.count)")
+                Thread.sleep(forTimeInterval: 17.0 + Double.random(in: 0...6.0))
+            }
+        }
+        loadedPages = tunnelPages
+        print("[tunnel] \(tunnelPages) pages -> \(events.count) unique events")
+        stageStart = Date()
+    }
 
     func storeCards(_ cards: [FB.Card], _ townName: String) -> Int {
         var fresh = 0
@@ -351,7 +420,7 @@ func run() throws {
     let pagesBox = LockedBox(0)
     let blockedBox = LockedBox(false)
     let runningH = LockedBox(drivers.count)
-    for w in 0..<drivers.count {
+    if !tunnel { for w in 0..<drivers.count {
         let th = Thread {
             defer { runningH.with { $0 -= 1 } }
             while true {
@@ -369,7 +438,7 @@ func run() throws {
         }
         th.name = "fbnear-w\(w)"
         th.start()
-    }
+    } }
     while runningH.with({ $0 }) > 0 { Thread.sleep(forTimeInterval: 0.05) }
     loadedPages = pagesBox.with { $0 }
     events = eventsBox.with { $0 }
@@ -382,7 +451,7 @@ func run() throws {
         var qs: [String: Jev.Question] = [:]
         var idMap: [String: String] = [:]
         for (id, r) in events {
-            guard let wt = r.whenText else { continue }
+            guard let wt = r.whenText, !wt.isEmpty else { continue }
             let qid = "q\(idMap.count)"
             idMap[qid] = id
             qs[qid] = Jev.Question(
@@ -472,7 +541,7 @@ func run() throws {
                     viaHTTP = true
                     Thread.sleep(forTimeInterval: 0.5 + Double.random(in: 0...0.7))
                 }
-                if fetched == nil && !noFetch {
+                if fetched == nil && !noFetch && !tunnel {
                     _ = try? drivers[w].eval(FB.fetchDetailJS(url))
                     let deadline = Date().addingTimeInterval(12)
                     while Date() < deadline {
