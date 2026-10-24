@@ -72,6 +72,8 @@ func run() throws {
     let queries = (argValue("--query") ?? "events").split(separator: ",").map(String.init)
     let refreshTowns = hasFlag("--refresh-towns")
     let keepTab = hasFlag("--keep-tab")
+    let tabs = max(1, Int(argValue("--tabs") ?? "") ?? 2)
+    let dashboard = hasFlag("--dashboard")
     let categories = (argValue("--categories") ?? "").split(separator: ",").map(String.init).filter { !$0.isEmpty }
 
     let outDir = URL(fileURLWithPath: argValue("--out")
@@ -106,18 +108,30 @@ func run() throws {
     let gatedOut = towns.count - gatedTowns.count
     if gatedOut > 0 { print("[towns] drive gate skips \(gatedOut) towns beyond ~\(maxDriveMin + 10) min") }
 
-    let driver = SafariDriver()
+    let drivers = (0..<tabs).map { SafariDriver(worker: $0) }
+    let driver = drivers[0]
     defer {
-        if !keepTab { driver.closeOurTab() }
-        driver.cleanup()
+        for d in drivers {
+            if !keepTab { d.closeOurTab() }
+            d.cleanup()
+        }
     }
 
     // MARK: Stage 2: resolve FB town codes
 
-    let missing = gatedTowns.filter { $0.fbCode == nil }
+    let weekAgo = now.addingTimeInterval(-7 * 86_400)
+    let missing = gatedTowns.filter { $0.fbCode == nil && ($0.unresolvedAt == nil || $0.unresolvedAt! < weekAgo) }
+    let skipped = gatedTowns.filter { $0.fbCode == nil && !missing.contains($0) }.count
+    if skipped > 0 { print("[codes] skipping \(skipped) unresolved towns (7-day TTL)") }
     if !missing.isEmpty {
         print("[codes] resolving \(missing.count) town codes via typeahead...")
-        _ = try driver.go("https://www.facebook.com/events/search/?q=x", readyJS: FB.searchReady)
+        do {
+            _ = try driver.go("https://www.facebook.com/events/search/?q=x", readyJS: FB.searchReady, timeout: 40)
+        } catch {
+            print("[codes] navigation failed (\(error)); recreating tab and retrying once")
+            driver.closeOurTab()
+            _ = try driver.go("https://www.facebook.com/events/search/?q=x", readyJS: FB.searchReady, timeout: 40)
+        }
         Thread.sleep(forTimeInterval: 1.5)
         var resolved = 0
         for var t in missing {
@@ -149,6 +163,7 @@ func run() throws {
                 print("  ok \(t.name) -> \(r.code) (\(r.canonical))")
             } else {
                 t.unresolvedReason = "no typeahead match"
+                t.unresolvedAt = Date()
                 print("  MISS \(t.name)")
             }
             _ = townName
@@ -167,44 +182,87 @@ func run() throws {
     let searchable = gatedTowns.filter { $0.fbCode != nil }
     print("[codes] \(searchable.count) towns searchable")
 
-    // MARK: Stage 3: harvest cards per town
+    // MARK: Stage 3: harvest cards per town (parallel worker tabs)
 
     var events: [String: EventRecord] = [:]
+    let eventsBox = LockedBox(events)
     var stageStart = Date()
     var loadedPages = 0
-    harvest: for town in searchable {
-        for q in queries {
-            let url = FB.searchURL(townCode: town.fbCode!, dateISO: fbDateFilter ? dateISO : nil, categoryCode: categories.first, query: q)
-            do {
-                try driver.go(url, readyJS: FB.searchReady)
-            } catch {
-                print("  [harvest] page failed \(town.name): \(error)")
-                continue
-            }
-            loadedPages += 1
-            if let data = try? driver.evalJSON(FB.extractCards),
-               let cards = try? JSONDecoder().decode([FB.Card].self, from: data) {
-                var fresh = 0
+    struct HarvestJob { let townIdx: Int; let code: String; let name: String; let km: Double; let query: String }
+    var jobsBuild: [HarvestJob] = []
+    for (i, town) in searchable.enumerated() {
+        for q in queries { jobsBuild.append(HarvestJob(townIdx: i, code: town.fbCode!, name: town.name, km: town.km, query: q)) }
+    }
+    if dashboard { jobsBuild.insert(HarvestJob(townIdx: -1, code: "", name: "Dashboard (nearby)", km: 0, query: ""), at: 0) }
+    let jobs = jobsBuild
+
+    func harvestPage(_ job: HarvestJob, _ d: SafariDriver) {
+        let url: String
+        if job.townIdx < 0 {
+            url = "https://www.facebook.com/events/"
+        } else {
+            url = FB.searchURL(townCode: job.code, dateISO: fbDateFilter ? dateISO : nil, categoryCode: categories.first, query: job.query)
+        }
+        do {
+            let ready = job.townIdx < 0 ? FB.dashboardReady : FB.searchReady
+            try d.go(url, readyJS: ready)
+        } catch FbnearError.blocked {
+            print("  [harvest] BLOCKED by Facebook rate limit; stopping all workers")
+            blockedBox.with { $0 = true }
+            return
+        } catch {
+            print("  [harvest] page failed \(job.name): \(error)")
+            return
+        }
+        if let data = try? d.evalJSON(FB.extractCards),
+           let cards = try? JSONDecoder().decode([FB.Card].self, from: data) {
+            var fresh = 0
+            eventsBox.with { ev in
                 for c in cards {
-                    if events[c.id] == nil {
-                        events[c.id] = EventRecord(
+                    if ev[c.id] == nil {
+                        ev[c.id] = EventRecord(
                             id: c.id, url: "https://www.facebook.com/events/\(c.id)/",
                             title: c.text, start: nil, end: nil, endIsFallback: false,
                             isPast: nil, address: nil, place: nil, lat: nil, lng: nil,
                             driveSeconds: nil, driveMeters: nil,
-                            townsSeenIn: [town.name], whenText: c.text, keep: false)
+                            townsSeenIn: [job.name], whenText: c.text, keep: false)
                         fresh += 1
-                    } else if !events[c.id]!.townsSeenIn.contains(town.name) {
-                        events[c.id]!.townsSeenIn.append(town.name)
+                    } else if !(ev[c.id]!.townsSeenIn.contains(job.name)) {
+                        ev[c.id]!.townsSeenIn.append(job.name)
                     }
                 }
-                print("  [\(String(format: "%4.1f", town.km)) km] \(town.name.padding(toLength: 30, withPad: " ", startingAt: 0)) +\(fresh)")
             }
-            Thread.sleep(forTimeInterval: 0.5)
-            if events.count >= maxDetails * 3 { print("[harvest] early stop: enough candidates"); break harvest }
+            print("  [\(String(format: "%4.1f", job.km)) km] \(job.name.padding(toLength: 30, withPad: " ", startingAt: 0)) +\(fresh)")
         }
     }
-    print("[harvest] \(loadedPages) pages -> \(events.count) unique events (\(Int(Date().timeIntervalSince(stageStart)))s)")
+
+    let counter = LockedBox(0)
+    let pagesBox = LockedBox(0)
+    let blockedBox = LockedBox(false)
+    let runningH = LockedBox(drivers.count)
+    for w in 0..<drivers.count {
+        let th = Thread {
+            defer { runningH.with { $0 -= 1 } }
+            while true {
+                let i = counter.with { c -> Int in
+                    if c < jobs.count { c += 1; return c - 1 }
+                    return -1
+                }
+                if i < 0 { return }
+                if blockedBox.with({ $0 }) { return }
+                let job = jobs[i]
+                harvestPage(job, drivers[w])
+                pagesBox.with { $0 += 1 }
+                Thread.sleep(forTimeInterval: 1.0 + Double.random(in: 0...1.5))
+            }
+        }
+        th.name = "fbnear-w\(w)"
+        th.start()
+    }
+    while runningH.with({ $0 }) > 0 { Thread.sleep(forTimeInterval: 0.05) }
+    loadedPages = pagesBox.with { $0 }
+    events = eventsBox.with { $0 }
+    print("[harvest] \(loadedPages) pages on \(drivers.count) tabs -> \(events.count) unique events (\(Int(Date().timeIntervalSince(stageStart)))s)")
 
     // MARK: Stage 4a: card-date prefilter (details carry exact timestamps)
 
@@ -241,35 +299,94 @@ func run() throws {
         }
     }
 
-    // MARK: Stage 4b: event details
+    // MARK: Stage 4b: event details (parallel worker tabs, 12h detail cache)
 
     stageStart = Date()
-    let ids = events.keys.sorted { events[$0]!.townsSeenIn.count > events[$1]!.townsSeenIn.count }
-    var detailCount = 0
-    for id in ids.prefix(maxDetails) {
-        guard let rec = events[id] else { continue }
-        do {
-            try driver.go(rec.url, readyJS: FB.eventReady)
-            if let data = try? driver.evalJSON(FB.extractDetail),
-               let d = try? JSONDecoder().decode(FB.Detail.self, from: data) {
-                var r = rec
-                if let t = d.title, t.count > 3 { r.title = t }
-                r.start = d.start.map { Geo.localDate($0) }
-                r.end = d.end.map { Geo.localDate($0) }
-                r.isPast = d.isPast
-                r.address = d.address
-                r.place = d.place
-                r.lat = d.lat
-                r.lng = d.lng
-                events[id] = r
-                detailCount += 1
-            }
-        } catch {
-            print("  [detail] failed \(id): \(error)")
+    let detailsCacheURL = configDir.appendingPathComponent("details.json")
+    struct DetailCacheEntry: Codable { var detail: FB.Detail; var fetchedAt: Date }
+    var detailCache: [String: DetailCacheEntry] = [:]
+    if let data = try? Data(contentsOf: detailsCacheURL) {
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+        if let c = try? dec.decode([String: DetailCacheEntry].self, from: data) {
+            detailCache = c
         }
-        Thread.sleep(forTimeInterval: 0.4)
     }
-    print("[details] \(detailCount)/\(min(ids.count, maxDetails)) pages read (\(Int(Date().timeIntervalSince(stageStart)))s)")
+    let cacheCutoff = now.addingTimeInterval(-12 * 3600)
+    for (id, r) in events where r.start == nil {
+        if let e = detailCache[id], e.fetchedAt > cacheCutoff {
+            let d = e.detail
+            events[id]?.start = d.start.map { Geo.localDate($0) }
+            events[id]?.end = d.end.map { Geo.localDate($0) }
+            events[id]?.isPast = d.isPast
+            events[id]?.address = d.address
+            events[id]?.place = d.place
+            events[id]?.lat = d.lat
+            events[id]?.lng = d.lng
+            if let tt = d.title, tt.count > 3 { events[id]?.title = tt }
+        }
+    }
+    let cachedCount = events.values.filter { $0.start != nil }.count
+    print("[details] cache hit for \(cachedCount) events")
+    let detailIds = Array(events.keys.sorted { events[$0]!.townsSeenIn.count > events[$1]!.townsSeenIn.count }.prefix(maxDetails))
+    let detailCounter = LockedBox(0)
+    let detailDone = LockedBox(0)
+    let cacheBox = LockedBox(detailCache)
+    let runningD = LockedBox(drivers.count)
+    for w in 0..<drivers.count {
+        let th = Thread {
+            defer { runningD.with { $0 -= 1 } }
+            while true {
+                let i = detailCounter.with { c -> Int in
+                    if c < detailIds.count { c += 1; return c - 1 }
+                    return -1
+                }
+                if i < 0 { return }
+                let id = detailIds[i]
+                if eventsBox.with({ ev in ev[id]?.start != nil }) { detailDone.with { $0 += 1 }; continue }
+                let url = "https://www.facebook.com/events/\(id)/"
+                if blockedBox.with({ $0 }) { return }
+                do {
+                    try drivers[w].go(url, readyJS: FB.eventReady)
+                    if let data = try? drivers[w].evalJSON(FB.extractDetail),
+                       let d = try? JSONDecoder().decode(FB.Detail.self, from: data) {
+                        eventsBox.with { ev in
+                            guard var r = ev[id] else { return }
+                            if let tt = d.title, tt.count > 3 { r.title = tt }
+                            r.start = d.start.map { Geo.localDate($0) }
+                            r.end = d.end.map { Geo.localDate($0) }
+                            r.isPast = d.isPast
+                            r.address = d.address
+                            r.place = d.place
+                            r.lat = d.lat
+                            r.lng = d.lng
+                            ev[id] = r
+                        }
+                        cacheBox.with { $0[id] = DetailCacheEntry(detail: d, fetchedAt: Date()) }
+                        detailDone.with { $0 += 1 }
+                    }
+                } catch FbnearError.blocked {
+                    print("  [detail] BLOCKED by Facebook rate limit; stopping all workers")
+                    blockedBox.with { $0 = true }
+                } catch {
+                    print("  [detail] failed \(id): \(error)")
+                }
+                Thread.sleep(forTimeInterval: 0.6 + Double.random(in: 0...0.9))
+            }
+        }
+        th.name = "fbnear-d\(w)"
+        th.start()
+    }
+    while runningD.with({ $0 }) > 0 { Thread.sleep(forTimeInterval: 0.05) }
+    events = eventsBox.with { $0 }
+    let enc = JSONEncoder()
+    enc.dateEncodingStrategy = .iso8601
+    detailCache = cacheBox.with { $0 }
+    if let data = try? enc.encode(detailCache) {
+        try? fm.createDirectory(at: configDir, withIntermediateDirectories: true)
+        try? data.write(to: detailsCacheURL, options: .atomic)
+    }
+    print("[details] \(detailDone.with { $0 })/\(detailIds.count) pages read (\(Int(Date().timeIntervalSince(stageStart)))s)")
 
     // MARK: Stage 5: geocode gaps + drive ETAs
 

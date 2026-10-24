@@ -26,6 +26,7 @@ enum FB {
     }
 
     static let searchReady = "location.href.indexOf('/events/search')>=0 && !!document.querySelector('input[aria-label=\"Location\"]') ? '1':'0'"
+    static let dashboardReady = "location.href.indexOf('/events')>=0 && document.readyState==='complete' && document.documentElement.innerHTML.length>100000 ? '1':'0'"
     static let eventReady = "location.href.indexOf('/events/')>=0 && document.readyState==='complete' && document.documentElement.innerHTML.length>120000 ? '1':'0'"
 
     /// Extracts event cards from the current search/dashboard page.

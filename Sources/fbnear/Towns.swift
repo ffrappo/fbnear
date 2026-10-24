@@ -11,6 +11,7 @@ struct Town: Codable, Equatable {
     var fbCode: String?
     var fbName: String?
     var unresolvedReason: String?
+    var unresolvedAt: Date?
 }
 
 struct TownsCache: Codable {
