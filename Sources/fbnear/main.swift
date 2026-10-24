@@ -382,7 +382,21 @@ func run() throws {
                 let url = "https://www.facebook.com/events/\(id)/"
                 if blockedBox.with({ $0 }) { return }
                 var fetched: FB.Detail? = nil
-                if !noFetch {
+                var viaHTTP = false
+                if let h = try? DetailHTTP.fetch(eventID: id), h.start != nil {
+                    var d = FB.Detail()
+                    d.title = h.title
+                    d.start = h.start
+                    d.end = h.end
+                    d.lat = h.lat
+                    d.lng = h.lng
+                    d.address = h.address
+                    d.isPast = h.isPast
+                    fetched = d
+                    viaHTTP = true
+                    Thread.sleep(forTimeInterval: 0.5 + Double.random(in: 0...0.7))
+                }
+                if fetched == nil && !noFetch {
                     _ = try? drivers[w].eval(FB.fetchDetailJS(url))
                     let deadline = Date().addingTimeInterval(12)
                     while Date() < deadline {
@@ -396,6 +410,7 @@ func run() throws {
                     }
                 }
                 if let d = fetched, d.start != nil {
+                    _ = viaHTTP
                     eventsBox.with { ev in
                         guard var r = ev[id] else { return }
                         if let tt = d.title, tt.count > 3 { r.title = tt }
@@ -557,6 +572,17 @@ func run() throws {
 }
 
 setbuf(stdout, nil)
+
+if let probe = argValue("--probe-detail") {
+    for id in probe.split(separator: ",").map(String.init) {
+        do {
+            let r = try DetailHTTP.fetch(eventID: id)
+            print(id, "| start", r.start ?? -1, "| end", r.end ?? -1, "| lat", r.lat ?? -1, "| past", r.isPast ?? false, "|", (r.title ?? "").prefix(45), "|", (r.address ?? "").prefix(40))
+        } catch { print(id, "ERROR", error) }
+        Thread.sleep(forTimeInterval: 1.0)
+    }
+    exit(0)
+}
 
 do {
     try run()
