@@ -1,0 +1,23 @@
+{
+ "days": {
+  "2026-10-24": {
+   "dateISO": "2026-10-24",
+   "driveBudget": "45",
+   "events": [
+    {
+     "driveMeters": 28083,
+     "driveSeconds": 1601,
+     "end": "2026-11-08T22:00:00Z",
+     "ongoing": true,
+     "start": "2026-10-24T08:00:00Z",
+     "title": "(20+) ZUCCALAND - Festival d'autunno - Castello Scaligero di Villafranca",
+     "url": "https://www.facebook.com/events/1651843696595046/",
+     "venue": "Castello Scaligero Villafranca di Verona , 37069 Villafranca di Verona, Italy"
+    }
+   ],
+   "generatedAt": "14:02",
+   "towns": 25
+  }
+ },
+ "defaultDay": "2026-10-24"
+}

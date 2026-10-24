@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vicino</title>
+<style>
+  :root{
+    --bg:#101418; --panel:#161b21; --line:#242c35; --ink:#e8edf2; --dim:#93a1af;
+    --accent:#5ec26a; --accent-ink:#0d130f; --link:#8ab4f8;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+    font-feature-settings:"tnum" 1}
+  ::selection{background:var(--accent);color:var(--accent-ink)}
+  main{max-width:46rem;margin:0 auto;padding:1.25rem 1rem 3rem}
+  header{display:flex;align-items:baseline;justify-content:space-between;gap:1rem;
+    padding:.75rem 0 1rem;border-bottom:1px solid var(--line);margin-bottom:1rem}
+  h1{font-size:1.25rem;margin:0;letter-spacing:-.02em}
+  .meta{color:var(--dim);font-size:.8rem;text-align:right;line-height:1.35}
+  .tabs{display:flex;gap:.4rem;margin-bottom:1rem}
+  .tabs button{appearance:none;border:1px solid var(--line);background:var(--panel);
+    color:var(--ink);font:inherit;font-size:.9rem;padding:.35rem .85rem;border-radius:99px;cursor:pointer}
+  .tabs button[aria-pressed=true]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:600}
+  ol{list-style:none;margin:0;padding:0}
+  li{display:grid;grid-template-columns:4.6rem 1fr;gap:.4rem 1rem;
+    padding:.9rem 0;border-bottom:1px solid var(--line)}
+  li:last-child{border-bottom:0}
+  .drive{font-weight:700;font-size:1.05rem;letter-spacing:-.01em}
+  .drive small{display:block;font-weight:400;color:var(--dim);font-size:.78rem;margin-top:.1rem}
+  .when{color:var(--dim);font-size:.85rem}
+  .when b{color:var(--ink);font-weight:600;font-size:.95rem;margin-right:.35rem}
+  a.title{color:var(--link);text-decoration:none;font-weight:600;font-size:1.02rem}
+  a.title:hover,a.title:focus-visible{text-decoration:underline;text-underline-offset:3px}
+  .venue{color:var(--dim);font-size:.85rem;margin-top:.15rem}
+  .empty{color:var(--dim);padding:2.5rem 0;text-align:center}
+  .empty b{display:block;color:var(--ink);font-size:1.05rem;margin-bottom:.3rem}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:4px}
+  @media (max-width:30rem){
+    li{grid-template-columns:3.9rem 1fr;gap:.3rem .7rem}
+    h1{font-size:1.1rem}
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Vicino</h1>
+    <p class="meta" id="meta">…</p>
+  </header>
+  <nav class="tabs" id="tabs" aria-label="Giorno"></nav>
+  <ol id="list"></ol>
+  <p class="empty" id="empty" hidden><b>Nessun evento</b>Niente di raggiungibile entro il tempo guida per questo giorno.</p>
+</main>
+<script>
+'use strict';
+const fmtTime = ts => new Date(ts).toLocaleTimeString('it-IT',{hour:'2-digit',minute:'2-digit',timeZone:'Europe/Rome'});
+const fmtDay  = d => d.toLocaleDateString('it-IT',{weekday:'long',day:'numeric',month:'long'});
+
+let data = null;
+let pickedKey = null;
+
+function keys(){
+  const ks = Object.keys(data.days || {}).sort();
+  return ks.length ? ks : ['today'];
+}
+function pick(k){
+  pickedKey = k;
+  render();
+}
+function render(){
+  const tabs = document.getElementById('tabs');
+  const list = document.getElementById('list');
+  const meta = document.getElementById('meta');
+  const empty = document.getElementById('empty');
+  tabs.textContent = '';
+  for (const k of keys()){
+    const b = document.createElement('button');
+    const d = data.days[k] && data.days[k].dateISO ? data.days[k].dateISO + 'T12:00:00' : null;
+    b.textContent = d ? fmtDay(new Date(d)) : k;
+    b.setAttribute('aria-pressed', String(k === pickedKey));
+    b.addEventListener('click', () => pick(k));
+    tabs.appendChild(b);
+  }
+  const day = (data.days && data.days[pickedKey]) || {events:[]};
+  meta.textContent = day.towns ? day.towns + ' comuni · ' : '';
+  meta.textContent += day.driveBudget ? day.driveBudget + ' min auto · ' : '';
+  meta.textContent += day.generatedAt ? 'aggiornato ' + day.generatedAt : '';
+  list.textContent = '';
+  const evs = day.events || [];
+  empty.hidden = evs.length > 0;
+  for (const e of evs){
+    const li = document.createElement('li');
+    const drive = document.createElement('div');
+    drive.className = 'drive';
+    drive.textContent = Math.round(e.driveSeconds/60) + ' min';
+    const km = document.createElement('small');
+    km.textContent = (e.driveMeters/1000).toFixed(1).replace('.',',') + ' km';
+    drive.appendChild(km);
+    const body = document.createElement('div');
+    const when = document.createElement('p');
+    when.className = 'when';
+    const t = document.createElement('b'); t.textContent = e.start ? fmtTime(e.start) : '--:--';
+    when.appendChild(t);
+    when.appendChild(document.createTextNode(e.startsLabel || ''));
+    const a = document.createElement('a');
+    a.className = 'title'; a.href = e.url; a.target = '_blank'; a.rel = 'noopener';
+    a.textContent = e.title;
+    const venue = document.createElement('p');
+    venue.className = 'venue';
+    venue.textContent = e.venue || '';
+    body.appendChild(when); body.appendChild(a); body.appendChild(venue);
+    li.appendChild(drive); li.appendChild(body);
+    list.appendChild(li);
+  }
+}
+fetch('data.json', {cache:'no-store'})
+  .then(r => r.json())
+  .then(j => {
+    data = j;
+    const ks = keys();
+    pick(data.defaultDay && ks.includes(data.defaultDay) ? data.defaultDay : ks[0]);
+  })
+  .catch(() => {
+    document.getElementById('meta').textContent = 'dati non disponibili';
+  });
+</script>
+</body>
+</html>

@@ -60,6 +60,71 @@ dayDF.timeZone = Geo.rome
 dayDF.dateFormat = "yyyy-MM-dd"
 let dateISO = dayDF.string(from: targetDay)
 
+struct WebDay: Codable {
+    var dateISO: String
+    var towns: Int
+    var driveBudget: String
+    var generatedAt: String
+    var events: [WebEvent]
+}
+struct WebEvent: Codable {
+    var title: String
+    var url: String
+    var start: Date?
+    var end: Date?
+    var driveSeconds: Double?
+    var driveMeters: Double?
+    var venue: String?
+    var ongoing: Bool
+}
+struct WebData: Codable {
+    var defaultDay: String
+    var days: [String: WebDay]
+}
+
+@MainActor
+func publishWeb(kept: [EventRecord], dateISO: String, towns: Int, maxDriveMin: Int, generatedAt: String) throws {
+    let repoDir = URL(fileURLWithPath: fm.homeDirectoryForCurrentUser.path + "/works/repos/fbnear")
+    let dataURL = repoDir.appendingPathComponent("web/data.json")
+    var web: WebData
+    if let old = try? Data(contentsOf: dataURL),
+       let parsed = try? JSONDecoder().decode(WebData.self, from: old) {
+        web = parsed
+    } else {
+        web = WebData(defaultDay: "today", days: [:])
+    }
+    let cal2 = cal
+    let events = kept.map { r in
+        WebEvent(title: r.title, url: r.url, start: r.start, end: r.end,
+                 driveSeconds: r.driveSeconds, driveMeters: r.driveMeters,
+                 venue: r.place ?? r.address,
+                 ongoing: { if let s = r.start { return s <= now && (r.end ?? s) > now }; return false }())
+    }
+    web.days[dateISO] = WebDay(dateISO: dateISO, towns: towns,
+                               driveBudget: "\(maxDriveMin)", generatedAt: generatedAt,
+                               events: events)
+    // keep the 7 most recent days
+    let sortedDays = web.days.keys.sorted()
+    if sortedDays.count > 7 {
+        for k in sortedDays.prefix(sortedDays.count - 7) { web.days[k] = nil }
+    }
+    let todayKey = dayDF.string(from: Date())
+    web.defaultDay = web.days[todayKey] != nil ? todayKey : (sortedDays.last ?? dateISO)
+    let enc2 = JSONEncoder()
+    enc2.dateEncodingStrategy = .iso8601
+    enc2.outputFormatting = [.sortedKeys]
+    try enc2.encode(web).write(to: dataURL, options: .atomic)
+
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/bin/bash")
+    p.arguments = ["-c", "cd \(repoDir.path) && git add web/data.json PRODUCT.md && git commit -q -m 'data \(dateISO)' --allow-empty-message 2>/dev/null; git push -q origin main 2>&1 || true"]
+    p.standardOutput = FileHandle.nullDevice
+    p.standardError = FileHandle.nullDevice
+    try p.run()
+    p.waitUntilExit()
+    print("[publish] web/data.json updated and pushed")
+}
+
 @MainActor
 func run() throws {
     let config = loadConfig()
@@ -75,6 +140,7 @@ func run() throws {
     let tabs = max(1, Int(argValue("--tabs") ?? "") ?? 2)
     let dashboard = hasFlag("--dashboard")
     let noFetch = hasFlag("--no-fetch")
+    let publish = hasFlag("--publish")
     let categories = (argValue("--categories") ?? "").split(separator: ",").map(String.init).filter { !$0.isEmpty }
 
     let outDir = URL(fileURLWithPath: argValue("--out")
@@ -569,6 +635,11 @@ func run() throws {
     print("[report] \(outDir.path)/report.html")
     print()
     print(Report.consoleSummary(records: kept))
+
+    if publish {
+        try publishWeb(kept: kept, dateISO: dateISO, towns: searchable.count,
+                       maxDriveMin: maxDriveMin, generatedAt: timeDF.string(from: now))
+    }
 }
 
 setbuf(stdout, nil)
