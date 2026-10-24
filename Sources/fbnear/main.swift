@@ -554,12 +554,24 @@ func run() throws {
     for (id, r) in events where r.start != nil {
         if let la = r.lat, let lo = r.lng { coords[id] = (la, lo) }
     }
-    let needGeocode = events.filter { $0.value.start != nil && $0.value.lat == nil && ($0.value.address != nil || $0.value.place != nil) }
+    let needGeocode = events.filter { $0.value.start != nil && $0.value.lat == nil }
     if !needGeocode.isEmpty {
         print("[geo] geocoding \(needGeocode.count) events without coordinates...")
         Task {
             for (id, r) in needGeocode {
-                if let c = await Geo.geocode(r.address ?? r.place ?? "", near: origin) {
+                var q = r.address ?? r.place ?? ""
+                let decTitle = r.title
+                    .replacingOccurrences(of: "&#064;", with: "@")
+                    .replacingOccurrences(of: "&amp;", with: "&")
+                    .replacingOccurrences(of: "&#039;", with: "'")
+                if q.isEmpty, let at = decTitle.range(of: "@") {
+                    let venue = decTitle[at.upperBound...].prefix(70)
+                        .replacingOccurrences(of: "Dal ", with: "")
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    let town = r.townsSeenIn.first { $0 != "Dashboard (nearby)" && !$0.contains("[") } ?? "Verona"
+                    if venue.count > 2 { q = "\(venue), \(town)" }
+                }
+                if !q.isEmpty, let c = await Geo.geocode(q, near: origin) {
                     events[id]?.lat = c.0
                     events[id]?.lng = c.1
                     coords[id] = c
@@ -613,6 +625,24 @@ func run() throws {
         r.dropReason = nil
         events[id] = r
         kept.append(r)
+    }
+    var fixedEvents: [String: EventRecord] = [:]
+    for (id, r) in events {
+        var rr = r
+        rr.title = rr.title
+            .replacingOccurrences(of: "&#064;", with: "@")
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&#039;", with: "'")
+        fixedEvents[id] = rr
+    }
+    events = fixedEvents
+    kept = kept.map { r in
+        var rr = r
+        rr.title = rr.title
+            .replacingOccurrences(of: "&#064;", with: "@")
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&#039;", with: "'")
+        return rr
     }
     kept.sort {
         let da = $0.driveSeconds ?? .infinity, db = $1.driveSeconds ?? .infinity

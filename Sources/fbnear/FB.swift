@@ -46,7 +46,6 @@ enum FB {
     })()
     """
 
-    /// Extracts the primary event's exact data from the event page preload JSON.
     static let extractDetail = """
     (function(){
       var html=document.documentElement.innerHTML, out={};
