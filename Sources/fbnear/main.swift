@@ -134,7 +134,9 @@ func run() throws {
     let maxDetails = Int(argValue("--max-details") ?? "") ?? 200
     let fbDateFilter = hasFlag("--fb-date-filter")
     let noPrefilter = hasFlag("--no-prefilter")
-    let queries = (argValue("--query") ?? "events").split(separator: ",").map(String.init)
+    let queriesOuter = (argValue("--query") ?? "events").split(separator: ",").map(String.init)
+    let queriesInner = (argValue("--queries-inner") ?? "events,concert,festa,sagra").split(separator: ",").map(String.init)
+    let innerKm = Double(argValue("--inner-km") ?? "") ?? 12
     let refreshTowns = hasFlag("--refresh-towns")
     let keepTab = hasFlag("--keep-tab")
     let tabs = max(1, Int(argValue("--tabs") ?? "") ?? 2)
@@ -258,7 +260,8 @@ func run() throws {
     struct HarvestJob { let townIdx: Int; let code: String; let name: String; let km: Double; let query: String }
     var jobsBuild: [HarvestJob] = []
     for (i, town) in searchable.enumerated() {
-        for q in queries { jobsBuild.append(HarvestJob(townIdx: i, code: town.fbCode!, name: town.name, km: town.km, query: q)) }
+        let qs = town.km <= innerKm ? queriesInner : queriesOuter
+        for q in qs { jobsBuild.append(HarvestJob(townIdx: i, code: town.fbCode!, name: town.name, km: town.km, query: q)) }
     }
     if dashboard { jobsBuild.insert(HarvestJob(townIdx: -1, code: "", name: "Dashboard (nearby)", km: 0, query: ""), at: 0) }
     let jobs = jobsBuild
@@ -393,8 +396,7 @@ func run() throws {
                     dropped += 1
                 }
             }
-            events = events.filter { $0.value.dropReason != "card date mismatch (jev)" }
-            print("[prefilter] jev kept \(events.count) of \(events.count + dropped) cards")
+            print("[prefilter] jev kept \(events.count - dropped) of \(events.count) cards")
         } catch {
             print("[prefilter] WARNING jev failed, keeping all cards and continuing: \(error)")
         }
@@ -429,7 +431,8 @@ func run() throws {
     }
     let cachedCount = events.values.filter { $0.start != nil }.count
     print("[details] cache hit for \(cachedCount) events")
-    let detailIds = Array(events.keys.sorted { events[$0]!.townsSeenIn.count > events[$1]!.townsSeenIn.count }.prefix(maxDetails))
+    let detailIds = Array(events.keys.filter { events[$0]!.dropReason == nil }
+        .sorted { events[$0]!.townsSeenIn.count > events[$1]!.townsSeenIn.count }.prefix(maxDetails))
     let detailCounter = LockedBox(0)
     let detailDone = LockedBox(0)
     let cacheBox = LockedBox(detailCache)
