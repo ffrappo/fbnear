@@ -27,7 +27,7 @@ func loadConfig() -> Config {
     return c
 }
 
-let args = CommandLine.arguments.dropFirst()
+let args = Array(CommandLine.arguments.dropFirst())
 @MainActor
 func argValue(_ name: String) -> String? {
     guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
@@ -89,8 +89,8 @@ func run() throws {
        abs(cache.originLat - origin.0) < 0.01,
        abs(cache.originLng - origin.1) < 0.01,
        cache.radiusKm >= radiusKm {
-        towns = cache.towns
-        print("[towns] cached \(towns.count) municipalities (radius \(Int(cache.radiusKm)) km)")
+        towns = cache.towns.filter { $0.km <= radiusKm + 0.01 }
+        print("[towns] cached \(towns.count) municipalities within \(Int(radiusKm)) km (cache radius \(Int(cache.radiusKm)) km)")
     } else {
         let stageStart = Date()
         let raw = try Towns.fetchOverpass(origin: origin, radiusKm: radiusKm)
@@ -359,6 +359,7 @@ func run() throws {
         "events": "\(events.count) seen, \(kept.count) reachable",
         "generated": timeDF.string(from: now),
     ]
+    try fm.createDirectory(at: outDir, withIntermediateDirectories: true)
     let fullEnc = JSONEncoder()
     fullEnc.dateEncodingStrategy = .iso8601
     fullEnc.outputFormatting = [.prettyPrinted, .sortedKeys]

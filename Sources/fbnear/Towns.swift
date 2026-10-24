@@ -115,7 +115,7 @@ enum Towns {
         """
         let dbg = ProcessInfo.processInfo.environment["FBNEAR_DEBUG"] != nil
         var candidates: [(code: String, text: String)] = []
-        for i in 0..<5 {
+        for i in 0..<3 {
             Thread.sleep(forTimeInterval: 1.6)
             let raw = (try? driver.eval(scan)) ?? "<eval-failed>"
             if dbg { print("      [dbg] poll \(i) raw=\(raw.prefix(160))") }
@@ -132,7 +132,7 @@ enum Towns {
         // Jev picks the row that is the intended municipality (or none of them).
         var qs: [String: Jev.Question] = [:]
         qs["pick"] = Jev.Question(
-            instructions: "Intended municipality: \(name), in the province of Verona, Veneto, Italy. Which Facebook location suggestion below is this exact same municipality? Answer none if none of them is it.",
+            instructions: "Intended municipality: \(name), in the province of Verona, Veneto, Italy. Which Facebook location suggestion below is this exact same municipality? Suggestion text may omit suffixes, but a same-name municipality in a different Italian province is a different place (for example the large Rivoli in Piemonte is not Rivoli Veronese): for those choose none.",
             criteria: {
                 var c: [String: String] = ["none": "None of the suggestions is the intended municipality"]
                 for (i, cand) in candidates.enumerated() {
