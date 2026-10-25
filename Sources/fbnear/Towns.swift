@@ -116,7 +116,9 @@ enum Towns {
             if let raw = try? driver.eval("window.__tq||'pending'"), raw != "pending",
                let dec = raw.removingPercentEncoding, dec != "pending",
                let data = dec.data(using: .utf8), !data.isEmpty {
-                if dec.contains("no-auth") || dec.contains("error") { return nil }
+                if dec.contains("no-auth") || dec.contains("error") {
+                throw NSError(domain: "typeahead", code: 1, userInfo: [NSLocalizedDescriptionKey: "surface auth/transport failure: " + dec.prefix(120)])
+            }
                 if let rows = try? JSONDecoder().decode([GQLCity].self, from: data) {
                     return try pickCity(name: name, rows: rows)
                 }

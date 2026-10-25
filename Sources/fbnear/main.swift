@@ -201,7 +201,10 @@ func run() throws {
         Thread.sleep(forTimeInterval: 1.5)
         var resolved = 0
         for var t in missing {
-            var result: (code: String, canonical: String)? = try? Towns.resolveCodeGraphQL(driver: driver, name: t.name)
+            var result: (code: String, canonical: String)? = nil
+            var surfaceFailure = false
+            do { result = try Towns.resolveCodeGraphQL(driver: driver, name: t.name) }
+            catch { surfaceFailure = true; print("  ERR \(t.name): \(error.localizedDescription)") }
             if result == nil && !noSearch {
                 _ = try? driver.go("https://www.facebook.com/events/search/?q=x", readyJS: FB.searchReady, timeout: 30)
                 result = try? Towns.resolveCode(driver: driver, name: t.name)
@@ -226,6 +229,11 @@ func run() throws {
                 t.fbName = r.canonical
                 resolved += 1
                 print("  ok \(t.name) -> \(r.code) (\(r.canonical))")
+            } else if surfaceFailure {
+                // surface broken (block/auth/transport): retry next run, never cache as MISS
+                t.unresolvedReason = nil
+                t.unresolvedAt = nil
+                print("  RETRY \(t.name) (typeahead surface failed, not cached as MISS)")
             } else {
                 t.unresolvedReason = "no typeahead match"
                 t.unresolvedAt = Date()
@@ -443,6 +451,38 @@ func run() throws {
     loadedPages = pagesBox.with { $0 }
     events = eventsBox.with { $0 }
     print("[harvest] \(loadedPages) pages on \(drivers.count) tabs -> \(events.count) unique events (\(Int(Date().timeIntervalSince(stageStart)))s)")
+
+    // MARK: Stage 3b: per-day pool (runs accumulate; dashboard feeds rotate slots)
+    let poolURL = configDir.appendingPathComponent("pool-\(dateISO).json")
+    struct PoolEntry: Codable { var title: String; var townsSeenIn: [String]; var whenText: String? }
+    var pool: [String: PoolEntry] = [:]
+    if let data = try? Data(contentsOf: poolURL),
+       let loaded = try? JSONDecoder().decode([String: PoolEntry].self, from: data) { pool = loaded }
+    var pooled = 0
+    for (id, pe) in pool where events[id] == nil {
+        events[id] = EventRecord(
+            id: id, url: "https://www.facebook.com/events/\(id)/",
+            title: pe.title, start: nil, end: nil, endIsFallback: false,
+            isPast: nil, address: nil, place: nil, lat: nil, lng: nil,
+            driveSeconds: nil, driveMeters: nil,
+            townsSeenIn: pe.townsSeenIn, whenText: pe.whenText, keep: false)
+        pooled += 1
+    }
+    if pooled > 0 { print("[pool] +\(pooled) events from earlier runs today (\(pool.count) pooled)") }
+    var poolOut: [String: PoolEntry] = [:]
+    for (id, r) in events {
+        poolOut[id] = PoolEntry(title: r.title, townsSeenIn: r.townsSeenIn, whenText: r.whenText)
+    }
+    if let data = try? JSONEncoder().encode(poolOut) { try? data.write(to: poolURL) }
+    // drop pools older than 3 days
+    if let files = try? fm.contentsOfDirectory(at: configDir, includingPropertiesForKeys: nil) {
+        for f in files where f.lastPathComponent.hasPrefix("pool-") {
+            if let dstr = f.lastPathComponent.dropFirst(5).split(separator: ".").first.map(String.init),
+               let d = dayDF.date(from: dstr), d < now.addingTimeInterval(-3 * 86400) {
+                try? fm.removeItem(at: f)
+            }
+        }
+    }
 
     // MARK: Stage 4a: card-date prefilter (details carry exact timestamps)
 
