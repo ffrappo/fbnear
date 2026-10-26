@@ -820,7 +820,10 @@ func run() throws {
     print()
     print(Report.consoleSummary(records: kept))
 
-    let harvestOK = loadedPages > 0 && !blockedBox.with({ $0 })
+    // Valid result: publish whenever we produced kept events; a partially
+    // blocked harvest with kept events is still good data (block-aware skip).
+    // A zero-keep harvest is only trustworthy when pages loaded unblocked.
+    let harvestOK = kept.isEmpty ? (loadedPages > 0 && !blockedBox.with({ $0 })) : true
     if publish && harvestOK {
         try publishWeb(kept: kept, dateISO: dateISO, towns: searchable.count,
                        maxDriveMin: maxDriveMin, generatedAt: timeDF.string(from: now))
