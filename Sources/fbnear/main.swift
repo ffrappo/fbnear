@@ -79,12 +79,12 @@ func harvestPage(url: String, name: String) {
 func harvest() {
     let feed = "https://www.facebook.com/events/?date_filter_option=TODAY&discover_tab=CUSTOM&end_date=\(dayMidnightUTC)&start_date=\(dayMidnightUTC)"
     var pages: [(String, String)] = [("https://www.facebook.com/events/", "Dashboard")]
-    for t in towns.prefix(6) { pages.append(("https://www.facebook.com/events/?discover_tab=LOCAL&location_id=\(t.code)", t.name)) }
-    // interleave 4 day-feed loads between the other pages, human pace
+    for t in towns.prefix(4) { pages.append(("https://www.facebook.com/events/?discover_tab=LOCAL&location_id=\(t.code)", t.name)) }
+    // interleave 2 day-feed loads between the other pages, human pace
     var seq: [(String, String)] = []
     for (i, p) in pages.enumerated() {
         seq.append(p)
-        if i % 2 == 0 { seq.append((feed, "Day feed #\(i / 2 + 1)")) }
+        if i == 1 || i == 3 { seq.append((feed, "Day feed #\(i / 2)")) }
     }
     for (url, name) in seq {
         harvestPage(url: url, name: name)
