@@ -40,7 +40,7 @@ enum FB {
         var par=a;
         for(var i=0;i<7&&par.parentElement;i++){ par=par.parentElement; var t=(par.innerText||'').replace(/\\s+/g,' ').trim(); if(t.length>90){ seen[m[1]]=1; out.push({id:m[1], text:t.slice(0,200)}); return; } }
         var t2=(a.innerText||'').replace(/\\s+/g,' ').trim();
-        if(t2.length>8){ seen[m[1]]=1; out.push({id:m[1], text:t2.slice(0,200)}); }
+        seen[m[1]]=1; out.push({id:m[1], text:t2.slice(0,200)});
       });
       return encodeURIComponent(JSON.stringify(out));
     })()

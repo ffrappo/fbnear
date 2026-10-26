@@ -271,6 +271,19 @@ func run() throws {
         }
     }
     if discover {
+        // CUSTOM day feed: whole-day national feed (ranked for the account), paginates on manual scroll
+        let dayStart = Calendar.current.startOfDay(for: targetDay)
+        let dayEnd = dayStart.addingTimeInterval(86400)
+        let iso = { (d: Date) in
+            let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            return f.string(from: d).replacingOccurrences(of: ":", with: "%3A")
+        }
+        // user-verified form: start_date == end_date == target-day midnight (UTC).
+        // Each load rotates a different ~9-event slice; 4 loads per run + the
+        // per-day pool accumulate coverage across scheduled runs.
+        for k in 1...4 {
+            jobsBuild.append(HarvestJob(townIdx: -1, code: "CUSTOM", name: "Day feed (custom #\(k))", km: 0, query: "", isDiscover: true, tab: "CUSTOM:" + iso(dayStart) + ":" + iso(dayStart)))
+        }
         for (i, town) in searchable.enumerated() {
             let tabs = town.km <= innerKm ? ["RECOMMENDED", "LOCAL"] : ["RECOMMENDED"]
             for tb in tabs { jobsBuild.append(HarvestJob(townIdx: i, code: town.fbCode!, name: town.name + " [" + tb + "]", km: town.km, query: "", isDiscover: true, tab: tb)) }
@@ -383,12 +396,15 @@ func run() throws {
         let url: String
         if job.townIdx < 0 {
             url = "https://www.facebook.com/events/"
+        } else if job.isDiscover && job.tab.hasPrefix("CUSTOM:") {
+            let parts = job.tab.split(separator: ":")
+            url = "https://www.facebook.com/events/?date_filter_option=TODAY&discover_tab=CUSTOM&end_date=\(parts.count > 2 ? parts[2] : "")&start_date=\(parts.count > 1 ? parts[1] : "")"
         } else if job.isDiscover {
             url = "https://www.facebook.com/events/?discover_tab=\(job.tab)&location_id=\(job.code)"
         } else {
             url = FB.searchURL(townCode: job.code, dateISO: fbDateFilter ? dateISO : nil, categoryCode: categories.first, query: job.query)
         }
-        if job.isDiscover && blockedBox.with({ $0 }) { return }
+        if job.isDiscover && job.townIdx >= 0 && blockedBox.with({ $0 }) { return }
         _ = noFetch // discover always navigates: its SSR carries no links
         // Fetch mode: no navigation, no render (dashboard/discover jobs always navigate)
         if !noFetch && job.townIdx >= 0 && !job.isDiscover {
@@ -417,10 +433,26 @@ func run() throws {
             print("  [harvest] page failed \(job.name): \(error)")
             return
         }
-        if let data = try? d.evalJSON(FB.extractCards),
-           let cards = try? JSONDecoder().decode([FB.Card].self, from: data) {
+        var cards: [FB.Card] = []
+        if job.isDiscover {
+            // dashboard/CUSTOM feeds render client-side: poll until links appear
+            for _ in 0..<10 {
+                if let data = try? d.evalJSON(FB.extractCards),
+                   let c = try? JSONDecoder().decode([FB.Card].self, from: data), !c.isEmpty {
+                    cards = c
+                    break
+                }
+                Thread.sleep(forTimeInterval: 1.2)
+            }
+        } else if let data = try? d.evalJSON(FB.extractCards),
+                  let c = try? JSONDecoder().decode([FB.Card].self, from: data) {
+            cards = c
+        }
+        if !cards.isEmpty {
             let fresh = storeCards(cards, job.name)
             print("  [\(String(format: "%4.1f", job.km)) km] \(job.name.padding(toLength: 30, withPad: " ", startingAt: 0)) +\(fresh)")
+        } else {
+            print("  [\(String(format: "%4.1f", job.km)) km] \(job.name.padding(toLength: 30, withPad: " ", startingAt: 0)) +0 (no cards rendered)")
         }
     }
 
@@ -552,6 +584,9 @@ func run() throws {
     let detailCounter = LockedBox(0)
     let detailDone = LockedBox(0)
     let cacheBox = LockedBox(detailCache)
+    // single source of truth: push main-thread state (pool, prefilter marks,
+    // cache-merged starts) into the box the detail threads read and write
+    eventsBox.with { $0 = events }
     let runningD = LockedBox(drivers.count)
     for w in 0..<drivers.count {
         let th = Thread {
