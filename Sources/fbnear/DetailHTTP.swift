@@ -1,105 +1,83 @@
 import Foundation
 
-/// Cookieless event-detail fetch: Facebook serves the full SSR preload
-/// (exact timestamps, venue coordinates) to crawler user agents.
-/// Used before the session-bound Safari paths; IP-rate-class only.
+/// Cookieless event-detail fetch: Googlebot UA gets the full SSR preload
+/// (exact timestamps, venue coordinates) from any IP, no account.
 enum DetailHTTP {
-    static let ua = "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)"
-
-    struct Result {
-        var title: String?
-        var start: Int?
-        var end: Int?
-        var lat: Double?
-        var lng: Double?
-        var address: String?
-        var isPast: Bool?
+    struct Detail: Codable {
+        var title: String?, start: Int?, end: Int?, lat: Double?, lng: Double?, address: String?, isPast: Bool?
     }
 
-    static func fetch(eventID: String, timeout: TimeInterval = 25) throws -> Result {
+    static func fetch(eventID: String, timeout: TimeInterval = 25) -> Detail? {
         var req = URLRequest(url: URL(string: "https://www.facebook.com/events/\(eventID)/")!)
-        req.setValue(ua, forHTTPHeaderField: "User-Agent")
+        req.setValue("Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)", forHTTPHeaderField: "User-Agent")
         req.timeoutInterval = timeout
-        let sem = DispatchSemaphore(value: 0)
-        var payload: Data?
-        var err: String?
-        let task = URLSession.shared.dataTask(with: req) { d, resp, e in
-            if let e = e { err = e.localizedDescription }
-            else if let http = resp as? HTTPURLResponse, http.statusCode != 200 { err = "HTTP \(http.statusCode)" }
-            else { payload = d }
-            sem.signal()
-        }
-        task.resume()
-        guard sem.wait(timeout: .now() + timeout + 5) == .success, let data = payload else {
-            throw FbnearError.safariScript("detail-http: \(err ?? "timeout")")
-        }
-        return parse(html: String(data: data, encoding: .utf8) ?? "", eventId: eventID)
+        guard let data = try? URLSession.synch(request: req), let html = String(data: data, encoding: .utf8) else { return nil }
+        return parse(html: html, eventId: eventID)
     }
 
-    static func parse(html: String, eventId: String? = nil) -> Result {
-        var r = Result()
-        if let m = html.range(of: "<title[^>]*>", options: .regularExpression) {
-            let rest = String(html[m.upperBound...]).prefix(200)
-            if let close = rest.range(of: "</title>") {
-                let t = Self.decodeEntities(String(rest[..<close.lowerBound]))
+    static func parse(html: String, eventId: String) -> Detail {
+        var d = Detail()
+        if let m = html.range(of: #"<title[^>]*>([^<]{1,200})</title>"#, options: .regularExpression) {
+            let seg = String(html[m])
+            if let a = seg.range(of: ">"), let b = seg.range(of: "</title>", range: a.upperBound..<seg.endIndex) {
+                d.title = decodeEntities(String(seg[a.upperBound..<b.lowerBound]))
                     .replacingOccurrences(of: " | Facebook", with: "")
-                if !t.isEmpty { r.title = t }
             }
         }
         if let m = html.range(of: #""start_timestamp":(\d{9,})"#, options: .regularExpression) {
-            r.start = Int(html[m].split(separator: ":")[1])
+            d.start = Int(html[m].split(separator: ":")[1])
         }
         if let m = html.range(of: #""end_timestamp":(\d{9,})"#, options: .regularExpression) {
-            r.end = Int(html[m].split(separator: ":")[1])
+            d.end = Int(html[m].split(separator: ":")[1])
         }
-
-        // Bind the venue to THIS event: pick the event_place whose surrounding
-        // window contains the event's own id; fall back to the first place.
-        var chosen: Range<String.Index>? = nil
-        var first: Range<String.Index>? = nil
+        if let m = html.range(of: #""is_past":(true|false)"#, options: .regularExpression) {
+            d.isPast = html[m].hasSuffix("true")
+        }
+        // venue bound to THIS event: event_place co-located with the event's own id
+        var place: Range<String.Index>? = nil
         var cursor = html.startIndex
         while let m = html.range(of: #""event_place":\{"#, options: .regularExpression, range: cursor..<html.endIndex) {
             cursor = m.upperBound
             let segEnd = html.index(m.upperBound, offsetBy: 900, limitedBy: html.endIndex) ?? html.endIndex
             let seg = html[m.lowerBound..<segEnd]
-            let hasLat = seg.range(of: #""latitude":"#, options: .regularExpression) != nil
-            if first == nil && hasLat { first = m }
-            if let eid = eventId, !eid.isEmpty {
-                let lo = html.index(m.lowerBound, offsetBy: -8000, limitedBy: html.startIndex) ?? html.startIndex
-                let hi = html.index(m.upperBound, offsetBy: 12000, limitedBy: html.endIndex) ?? html.endIndex
-                if html[lo..<hi].contains(#""id":"\#(eid)""#) && hasLat {
-                    chosen = m
-                    break
-                }
-            }
+            guard seg.range(of: #""latitude":"#, options: .regularExpression) != nil else { continue }
+            if place == nil { place = m }
+            let lo = html.index(m.lowerBound, offsetBy: -8000, limitedBy: html.startIndex) ?? html.startIndex
+            let hi = html.index(m.upperBound, offsetBy: 12000, limitedBy: html.endIndex) ?? html.endIndex
+            if html[lo..<hi].contains(#""id":"\#(eventId)""#) { place = m; break }
         }
-        let placeRange = chosen ?? first
-        if let pr = placeRange {
+        if let pr = place {
             let segEnd = html.index(pr.upperBound, offsetBy: 900, limitedBy: html.endIndex) ?? html.endIndex
             let seg = String(html[pr.lowerBound..<segEnd])
             if let m = seg.range(of: #""latitude":(-?\d+\.\d+)"#, options: .regularExpression) {
-                r.lat = Double(seg[m].split(separator: ":")[1].replacingOccurrences(of: "\"", with: ""))
+                d.lat = Double(seg[m].split(separator: ":")[1].replacingOccurrences(of: "\"", with: ""))
                 if let m2 = seg.range(of: #""longitude":(-?\d+\.\d+)"#, options: .regularExpression) {
-                    r.lng = Double(seg[m2].split(separator: ":")[1].replacingOccurrences(of: "\"", with: ""))
+                    d.lng = Double(seg[m2].split(separator: ":")[1].replacingOccurrences(of: "\"", with: ""))
                 }
             }
             if let m = seg.range(of: #""contextual_name":"((?:[^"\\]|\\.)*)""#, options: .regularExpression) {
-                let raw = String(seg[m])
-                let val = raw.split(separator: ":", maxSplits: 1)[1]
-                r.address = Self.decodeEntities(String(val.dropFirst().dropLast()))
+                let raw = String(seg[m]).split(separator: ":", maxSplits: 1)[1]
+                d.address = decodeEntities(String(raw.dropFirst().dropLast()))
             }
         }
-        if let m = html.range(of: #""is_past":(true|false)"#, options: .regularExpression) {
-            r.isPast = html[m].hasSuffix("true")
-        }
-        return r
+        return d
     }
 
     static func decodeEntities(_ s: String) -> String {
-        var out = s
-        for (e, c) in [("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""), ("&#039;", "'"), ("&apos;", "'"), ("&#x27;", "'")] {
-            out = out.replacingOccurrences(of: e, with: c)
-        }
-        return out
+        s.replacingOccurrences(of: "&#064;", with: "@")
+            .replacingOccurrences(of: "&amp;", with: "&")
+            .replacingOccurrences(of: "&#039;", with: "'")
+            .replacingOccurrences(of: "&quot;", with: "\"")
+    }
+}
+
+extension URLSession {
+    static func synch(request: URLRequest) throws -> Data {
+        var data: Data?; var err: Error?
+        let sem = DispatchSemaphore(value: 0)
+        URLSession.shared.dataTask(with: request) { d, _, e in data = d; err = e; sem.signal() }.resume()
+        sem.wait()
+        if let e = err { throw e }
+        return data ?? Data()
     }
 }
