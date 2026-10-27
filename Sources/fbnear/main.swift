@@ -192,6 +192,7 @@ for (id, e) in events.map {
     guard end > now, r.title.contains("Online") == false else { r.drop = "finished/online"; events.map[id] = r; continue }
     guard let eta = etas[id] else { r.drop = "no ETA"; events.map[id] = r; continue }
     guard eta.0 <= Double(config.maxDriveMin * 60) else { r.drop = "drive \(Int(eta.0 / 60)) min"; events.map[id] = r; continue }
+    guard now.addingTimeInterval(eta.0) < end else { r.drop = "cannot arrive before finish"; events.map[id] = r; continue }
     r.driveSeconds = eta.0; r.driveMeters = eta.1
     kept.append(r)
 }
