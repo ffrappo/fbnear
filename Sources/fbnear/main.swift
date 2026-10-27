@@ -16,6 +16,7 @@ let config: Config = {
 let args = Array(CommandLine.arguments.dropFirst())
 func arg(_ n: String) -> String? { args.firstIndex(of: n).flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } }
 let publish = args.contains("--publish")
+let cachedOnly = args.contains("--cached-only")
 let dateArg = arg("--date") ?? "today"
 let cal = Calendar.current
 let targetDay: Date = dateArg == "tomorrow" ? cal.date(byAdding: .day, value: 1, to: cal.startOfDay(for: Date()))!
@@ -108,10 +109,9 @@ if !poolLoaded.isEmpty {
     if pooled > 0 { print("[pool] +\(pooled) from earlier runs today") }
 }
 
-harvest()
+if !cachedOnly { harvest() }
 
 // MARK: details (cookieless crawler fetch, 12h cache)
-
 typealias Detail = DetailHTTP.Detail
 struct CacheEntry: Codable { var detail: Detail; var fetchedAt: Date }
 let cacheURL = configDir.appendingPathComponent("details.json")
@@ -127,7 +127,7 @@ for (id, e) in events.map where e.start == nil {
         if let t = d.title, t.count > 3 { events.map[id]?.title = t }
         continue
     }
-    if let d = DetailHTTP.fetch(eventID: id) {
+    if !cachedOnly, let d = DetailHTTP.fetch(eventID: id) {
         cache[id] = CacheEntry(detail: d, fetchedAt: Date())
         events.map[id]?.start = d.start.map { Date(timeIntervalSince1970: TimeInterval($0)) }
         events.map[id]?.end = d.end.map { Date(timeIntervalSince1970: TimeInterval($0)) }
@@ -210,23 +210,30 @@ for e in kept { print("  \(Int((e.driveSeconds ?? 0) / 60))min\t\(e.start.map(ti
 
 if publish && !(kept.isEmpty && events.map.count < 3) {
     struct WebEvent: Codable { var title: String; var url: String; var start: Date; var end: Date; var driveSeconds: Double; var driveMeters: Double; var venue: String? }
-    struct WebDay: Codable { var events: [WebEvent]; var generatedAt: String }
-    struct WebData: Codable { var days: [String: WebDay] }
+    struct WebDay: Codable { var events: [WebEvent]; var generatedAt: String; var dateISO: String?; var driveBudget: String? }
+    struct WebData: Codable { var days: [String: WebDay]; var defaultDay: String? = nil }
     let repo = "/Users/ffrappo/works/repos/fbnear"
     let dataURL = URL(fileURLWithPath: repo + "/web/data.json")
-    var web = (try? JSONDecoder().decode(WebData.self, from: Data(contentsOf: dataURL))) ?? WebData(days: [:])
-    web.days = web.days.filter { $0.key >= dayDF.string(from: cal.startOfDay(for: Date())) }
+    let day: Date = cal.startOfDay(for: Date())
+    let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+    var web = fm.fileExists(atPath: dataURL.path)
+        ? try dec.decode(WebData.self, from: Data(contentsOf: dataURL)) : WebData(days: [:])
+    web.days = web.days.filter { $0.key >= dayDF.string(from: day) }
     web.days[dateISO] = WebDay(events: kept.map { e in
         WebEvent(title: String(e.title.prefix(90)), url: "https://www.facebook.com/events/\(e.id)/",
-                 start: e.start ?? now, end: e.end ?? now,
+                 start: e.start!, end: e.end ?? e.start!.addingTimeInterval(3 * 3600),
                  driveSeconds: e.driveSeconds ?? 0, driveMeters: e.driveMeters ?? 0, venue: e.address)
-    }, generatedAt: timeF.string(from: now))
+    }, generatedAt: timeF.string(from: now), dateISO: dateISO, driveBudget: String(config.maxDriveMin))
+    web.defaultDay = web.days[dayDF.string(from: day)] != nil ? dayDF.string(from: day) : web.days.keys.sorted().first
     let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
-    if let data = try? enc.encode(web) {
-        try? data.write(to: dataURL)
-        let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/zsh")
-        p.arguments = ["-c", "cd \(repo) && git add web/data.json && git commit -qm 'data \(dateISO)' && git push -q origin main && git subtree split -q --prefix=web -b gh-pages-tmp && git push -q origin gh-pages-tmp:gh-pages && git branch -qD gh-pages-tmp"]
-        try? p.run(); p.waitUntilExit()
-        print("[publish] web/data.json updated and pushed")
+    try enc.encode(web).write(to: dataURL, options: .atomic)
+    let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+    p.environment = ProcessInfo.processInfo.environment.merging(["PATH": "/opt/homebrew/bin:" + fm.homeDirectoryForCurrentUser.path + "/.local/bin:" + (ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin")]) { _, new in new }
+    p.arguments = ["-c", "set -e; cd \(repo); git add web/data.json; if ! git diff --cached --quiet -- web/data.json; then git commit -qm 'data \(dateISO)'; fi; git push -q matchbox::github/ffrappo/fbnear main; branch=$(git subtree split -q --prefix=web); git push -q matchbox::github/ffrappo/fbnear \"$branch:gh-pages\""]
+    try p.run(); p.waitUntilExit()
+    guard p.terminationStatus == 0 else {
+        fputs("[publish] failed (exit \(p.terminationStatus)); local data was saved, public update is unconfirmed\n", stderr)
+        exit(1)
     }
+    print("[publish] web/data.json updated and pushed")
 }
