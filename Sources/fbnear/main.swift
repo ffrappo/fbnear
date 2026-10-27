@@ -227,9 +227,9 @@ if publish && !(kept.isEmpty && events.map.count < 3) {
     web.defaultDay = web.days[dayDF.string(from: day)] != nil ? dayDF.string(from: day) : web.days.keys.sorted().first
     let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
     try enc.encode(web).write(to: dataURL, options: .atomic)
-    let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+    let p = Process(); p.executableURL = URL(fileURLWithPath: "/bin/bash")
     p.environment = ProcessInfo.processInfo.environment.merging(["PATH": "/opt/homebrew/bin:" + fm.homeDirectoryForCurrentUser.path + "/.local/bin:" + (ProcessInfo.processInfo.environment["PATH"] ?? "/usr/bin:/bin")]) { _, new in new }
-    p.arguments = ["-c", "set -e; cd \(repo); git add web/data.json; if ! git diff --cached --quiet -- web/data.json; then git commit -qm 'data \(dateISO)'; fi; git push -q matchbox::github/ffrappo/fbnear main; branch=$(git subtree split -q --prefix=web); git push -q matchbox::github/ffrappo/fbnear \"$branch:gh-pages\""]
+    p.arguments = ["-c", "set -e; cd \(repo); git add web/data.json; if ! git diff --cached --quiet -- web/data.json; then git commit -qm 'data \(dateISO)'; fi; git push -q matchbox::github/ffrappo/fbnear main; branch=$(git subtree split -q --prefix=web); git push -q matchbox::github/ffrappo/fbnear \"${branch}:gh-pages\""]
     try p.run(); p.waitUntilExit()
     guard p.terminationStatus == 0 else {
         fputs("[publish] failed (exit \(p.terminationStatus)); local data was saved, public update is unconfirmed\n", stderr)
